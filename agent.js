@@ -3,17 +3,22 @@
  * GAG Auto-Reconnect Agent (Termux + root)
  * -----------------------------------------
  * Deteksi Roblox DC / FC / crash / kick lewat heartbeat API (+ cek proses lokal via root),
- * lalu auto force-stop & relaunch balik ke server yang bener (follow jobId / private server / public).
+ * lalu auto force-stop & relaunch balik ke server yang bener (follow / share link / private / public).
+ *
+ * Daftar akun ditarik dari dashboard (API). config.json cuma nyimpen apiKey + deviceId.
+ * Kalau API gagal, fallback ke `accounts` di config.json (offline mode).
  *
  * Butuh: Node 18+ (fetch built-in), akses root (su). Jalanin: node agent.js
  */
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { exec } = require("child_process");
 
 const CFG_PATH = path.join(__dirname, "config.json");
-const PAUSE_FILE = path.join(__dirname, "PAUSE"); // kill-switch: bikin file ini buat stop relaunch
+const DEVICE_PATH = path.join(__dirname, "device.json");
+const PAUSE_FILE = path.join(__dirname, "PAUSE"); // kill-switch: bikin file ini buat stop semua relaunch
 
 // ---------- util ----------
 function log(...a) {
@@ -32,6 +37,22 @@ function loadConfig() {
   return cfg;
 }
 
+// deviceId: dari config, atau device.json, atau generate baru sekali.
+function getDeviceId(cfg) {
+  if (cfg.deviceId) return cfg.deviceId;
+  try {
+    if (fs.existsSync(DEVICE_PATH)) {
+      const d = JSON.parse(fs.readFileSync(DEVICE_PATH, "utf8"));
+      if (d.deviceId) return d.deviceId;
+    }
+  } catch {}
+  const id = "dev-" + crypto.randomBytes(4).toString("hex");
+  try {
+    fs.writeFileSync(DEVICE_PATH, JSON.stringify({ deviceId: id }, null, 2));
+  } catch {}
+  return id;
+}
+
 // jalanin shell command, resolve {code, out, err}
 function sh(cmd) {
   return new Promise((resolve) => {
@@ -47,7 +68,6 @@ function sh(cmd) {
 
 // jalanin sebagai root
 function su(cmd) {
-  // escape single quote buat dibungkus su -c '...'
   const safe = cmd.replace(/'/g, `'\\''`);
   return sh(`su -c '${safe}'`);
 }
@@ -58,7 +78,6 @@ async function checkRoot() {
   return r.code === 0 && r.out.trim() === "0";
 }
 
-// true kalau proses package lagi jalan
 async function isRunning(pkg) {
   const r = await su(`pidof ${pkg}`);
   return r.code === 0 && r.out.length > 0;
@@ -69,46 +88,71 @@ async function forceStop(pkg) {
 }
 
 async function launchDeeplink(url) {
-  // pakai su biar konsisten & bisa launch dari background
   return su(`am start -a android.intent.action.VIEW -d "${url}"`);
 }
 
 function buildDeeplink(acc, session) {
-  const pid = acc.placeId;
-  // share link baru Roblox: roblox.com/share?code=xxxx&type=Server
+  const pid = acc.placeId || 129954712878723;
   if (acc.joinMode === "share" && acc.shareCode) {
     return `roblox://navigation/share_links?code=${acc.shareCode}&type=Server`;
   }
-  // private server format lama: ?privateServerLinkCode=xxxx
   if (acc.joinMode === "private" && acc.privateLinkCode) {
     return `roblox://placeId=${pid}&linkCode=${acc.privateLinkCode}`;
   }
   if (acc.joinMode === "follow" && session && session.jobId) {
     return `roblox://placeId=${pid}&gameInstanceId=${session.jobId}`;
   }
-  // fallback: public random server
   return `roblox://placeId=${pid}`;
 }
 
 // ---------- API ----------
+async function apiGet(cfg, path) {
+  const res = await fetch(`${cfg.apiBase}${path}`, { headers: { "x-api-key": cfg.apiKey } });
+  if (!res.ok) throw new Error(`GET ${path} → HTTP ${res.status}`);
+  return res.json();
+}
+
+async function apiPost(cfg, path) {
+  try {
+    await fetch(`${cfg.apiBase}${path}`, { method: "POST", headers: { "x-api-key": cfg.apiKey } });
+  } catch {}
+}
+
 async function fetchSessions(cfg) {
-  const res = await fetch(`${cfg.apiBase}/api/sessions`, {
-    headers: { "x-api-key": cfg.apiKey },
-  });
-  if (!res.ok) throw new Error(`sessions HTTP ${res.status}`);
-  const j = await res.json();
+  const j = await apiGet(cfg, "/api/sessions");
   const map = {};
   for (const s of j.sessions ?? []) map[String(s.userId)] = s;
   return map;
 }
 
+async function fetchAccounts(cfg, deviceId) {
+  try {
+    const j = await apiGet(cfg, `/api/agent/accounts?deviceId=${encodeURIComponent(deviceId)}`);
+    return j.accounts ?? [];
+  } catch (e) {
+    log(`⚠️  gagal ambil akun dari API (${e.message}) — pakai config.json`);
+    return cfg.accounts;
+  }
+}
+
 // ---------- state per akun ----------
-// { offlineSince, lastRelaunchAt, retries, pausedUntil }
 const state = new Map();
 function st(userId) {
   if (!state.has(userId))
     state.set(userId, { offlineSince: 0, lastRelaunchAt: 0, retries: 0, pausedUntil: 0 });
   return state.get(userId);
+}
+
+async function doRelaunch(cfg, acc, session, s, reason) {
+  s.lastRelaunchAt = Date.now();
+  const running = await isRunning(acc.package);
+  const url = buildDeeplink(acc, session);
+  log(`🔄 Relaunch ${acc.userId} (${reason}) | proses ${running ? "hidup(stuck)" : "mati"} | ${url}`);
+  await forceStop(acc.package);
+  await new Promise((r) => setTimeout(r, 2500));
+  const r = await launchDeeplink(url);
+  if (r.code !== 0) log(`   ❌ gagal launch: ${r.err || r.out || "code " + r.code}`);
+  else log(`   ▶️  launched, tunggu heartbeat balik (~1-2 menit)`);
 }
 
 async function handleAccount(cfg, acc, sessions) {
@@ -117,7 +161,18 @@ async function handleAccount(cfg, acc, sessions) {
   const session = sessions[String(acc.userId)];
   const online = !!(session && session.online);
 
-  // masih online → reset semua penanda
+  // perintah dari dashboard: relaunch paksa (one-shot)
+  if (acc.pendingCommand === "relaunch") {
+    if (!fs.existsSync(PAUSE_FILE)) {
+      s.offlineSince = 0;
+      s.retries = 0;
+      s.pausedUntil = 0;
+      await doRelaunch(cfg, acc, session, s, "perintah web");
+    }
+    if (acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`);
+    return;
+  }
+
   if (online) {
     if (s.offlineSince || s.retries) log(`✅ ${acc.userId} online lagi (server ${session.jobId || "-"})`);
     s.offlineSince = 0;
@@ -126,23 +181,16 @@ async function handleAccount(cfg, acc, sessions) {
     return;
   }
 
-  // offline: catat kapan mulai
   if (!s.offlineSince) {
     s.offlineSince = now;
     log(`⚠️  ${acc.userId} heartbeat putus (DC/FC/crash/kick?) — mulai hitung grace`);
     return;
   }
 
-  // masih dalam masa backoff (kena limit retry)
   if (s.pausedUntil && now < s.pausedUntil) return;
-
-  // belum lewat grace period → tunggu (biar ga panik pas lag sesaat)
   if (now - s.offlineSince < cfg.offlineGraceMs) return;
-
-  // masih cooldown dari relaunch terakhir (Roblox lagi loading) → tunggu
   if (s.lastRelaunchAt && now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return;
 
-  // kena limit retry → backoff
   if (s.retries >= cfg.maxRetries) {
     s.pausedUntil = now + cfg.backoffMs;
     s.retries = 0;
@@ -150,37 +198,31 @@ async function handleAccount(cfg, acc, sessions) {
     return;
   }
 
-  // kill-switch aktif?
   if (fs.existsSync(PAUSE_FILE)) {
     log(`⏸️  PAUSE aktif — skip relaunch ${acc.userId}`);
     return;
   }
 
-  // ---- RELAUNCH ----
   s.retries++;
-  s.lastRelaunchAt = now;
-  const running = await isRunning(acc.package);
-  const url = buildDeeplink(acc, session);
-  log(`🔄 Relaunch ${acc.userId} (percobaan ${s.retries}/${cfg.maxRetries}) | proses ${running ? "hidup(stuck)" : "mati"} | ${url}`);
-
-  await forceStop(acc.package);
-  await new Promise((r) => setTimeout(r, 2500));
-  const r = await launchDeeplink(url);
-  if (r.code !== 0) log(`   ❌ gagal launch: ${r.err || r.out || "code " + r.code}`);
-  else log(`   ▶️  launched, tunggu heartbeat balik (~1-2 menit)`);
+  await doRelaunch(cfg, acc, session, s, `percobaan ${s.retries}/${cfg.maxRetries}`);
 }
 
 // ---------- main loop ----------
 let running = true;
-async function tick(cfg) {
-  let sessions;
+async function tick(cfg, deviceId) {
+  let sessions, accounts;
   try {
     sessions = await fetchSessions(cfg);
   } catch (e) {
     log(`⚠️  gagal ambil /api/sessions: ${e.message}`);
     return;
   }
-  for (const acc of cfg.accounts) {
+  accounts = await fetchAccounts(cfg, deviceId);
+  if (!accounts.length) {
+    log("ℹ️  belum ada akun ditugasin ke device ini (tambah dari dashboard)");
+    return;
+  }
+  for (const acc of accounts) {
     try {
       await handleAccount(cfg, acc, sessions);
     } catch (e) {
@@ -191,8 +233,9 @@ async function tick(cfg) {
 
 async function main() {
   const cfg = loadConfig();
+  const deviceId = getDeviceId(cfg);
   log("=== GAG Auto-Reconnect Agent ===");
-  log(`API: ${cfg.apiBase} | poll ${cfg.pollMs / 1000}s | akun: ${cfg.accounts.map((a) => a.userId).join(", ") || "(kosong!)"}`);
+  log(`API: ${cfg.apiBase} | device: ${deviceId} | poll ${cfg.pollMs / 1000}s`);
 
   if (!(await checkRoot())) {
     log("❌ Root ga kedeteksi (su gagal). Grant root ke Termux dulu. Keluar.");
@@ -207,7 +250,7 @@ async function main() {
   });
 
   while (running) {
-    await tick(cfg);
+    await tick(cfg, deviceId);
     await new Promise((r) => setTimeout(r, cfg.pollMs));
   }
 }
