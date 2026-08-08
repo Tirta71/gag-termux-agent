@@ -250,9 +250,9 @@ async function doRelaunch(cfg, acc, session, s, reason) {
 
 // ---------- deteksi lokal (baca logcat tag Roblox) ----------
 // Semua error/disconnect → relog (sesuai permintaan). Backoff yang jadi rem.
-const RE_ERROR = /disconnected|lost connection|connection lost|reconnect|error code|\b(260|264|267|268|273|274|276|277|279|517|522|523|524|610|770|771|772|773)\b/i;
-// Sinyal "berhenti wajar" (background/pindah app/teleport) — BUKAN DC, di-skip
-const RE_GRACE = /stop\(\) called|pause game session|leaving game|teleport/i;
+const RE_ERROR = /disconnected|lost connection|connection lost|error code|\b(260|264|267|268|273|274|276|277|279|517|522|523|524|610)\b/i;
+// Sinyal yang BUKAN disconnect → di-skip (background, pindah app, teleport gagal/full 769-773)
+const RE_GRACE = /stop\(\) called|pause game session|leaving game|teleport|server is full|game is full|restricted|\b(769|770|771|772|773)\b/i;
 
 let lastLogEpoch = 0; // detik epoch log terakhir yg diproses
 async function checkLocalErrors(cfg, accounts, sessions) {
