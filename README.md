@@ -6,7 +6,10 @@ Roblox dan join balik ke server yang bener.
 
 Daftar akun **diatur dari dashboard** (menu Reconnect) — `config.json` di HP cuma nyimpen
 API key + device ID. Nambah/ubah akun, ganti server, tombol relaunch: semua dari web.
-
+##Command light
+```
+nohup node ~/gag-agent/agent.js > ~/gag-agent/agent.log 2>&1 &
+```
 ## Cara kerja singkat
 1. Poll `GET /api/agent/accounts?deviceId=…` (daftar akun) + `GET /api/sessions` (status online).
 2. Akun `online:false` lebih lama dari `offlineGraceMs` → dianggap putus.
