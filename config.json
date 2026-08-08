@@ -1,0 +1,18 @@
+{
+  "apiBase": "https://api.allegiaant.my.id",
+  "apiKey": "PASTE_REPORT_API_KEY_DISINI",
+  "pollMs": 10000,
+  "offlineGraceMs": 45000,
+  "relaunchCooldownMs": 120000,
+  "maxRetries": 5,
+  "backoffMs": 600000,
+  "accounts": [
+    {
+      "userId": "GANTI_USER_ID_ROBLOX",
+      "placeId": 129954712878723,
+      "package": "com.roblox.client",
+      "joinMode": "follow",
+      "privateLinkCode": ""
+    }
+  ]
+}
