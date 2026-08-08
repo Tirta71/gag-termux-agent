@@ -75,6 +75,11 @@ async function launchDeeplink(url) {
 
 function buildDeeplink(acc, session) {
   const pid = acc.placeId;
+  // share link baru Roblox: roblox.com/share?code=xxxx&type=Server
+  if (acc.joinMode === "share" && acc.shareCode) {
+    return `roblox://navigation/share_links?code=${acc.shareCode}&type=Server`;
+  }
+  // private server format lama: ?privateServerLinkCode=xxxx
   if (acc.joinMode === "private" && acc.privateLinkCode) {
     return `roblox://placeId=${pid}&linkCode=${acc.privateLinkCode}`;
   }

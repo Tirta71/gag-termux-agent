@@ -15,8 +15,9 @@ Roblox-nya mati beneran atau nyangkut.
 5. Gagal terus `maxRetries` kali → jeda `backoffMs` (anti loop pas kena ban/captcha).
 
 ## Mode join (per akun, di `config.json`)
-- `follow`  → balik ke server terakhir (`gameInstanceId` dari heartbeat). **Default.**
-- `private` → join private server, isi `privateLinkCode` (kode dari link `?privateServerLinkCode=xxxx`).
+- `share`   → private server link baru: `roblox.com/share?code=xxxx&type=Server`. Isi `shareCode` = bagian setelah `code=`.
+- `follow`  → balik ke server terakhir (`gameInstanceId` dari heartbeat).
+- `private` → private server format lama, isi `privateLinkCode` (kode dari `?privateServerLinkCode=xxxx`).
 - `public`  → server random.
 
 ## Setup di HP (Termux, sekali)

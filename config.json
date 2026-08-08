@@ -11,7 +11,8 @@
       "userId": "GANTI_USER_ID_ROBLOX",
       "placeId": 129954712878723,
       "package": "com.roblox.client",
-      "joinMode": "follow",
+      "joinMode": "share",
+      "shareCode": "",
       "privateLinkCode": ""
     }
   ]
