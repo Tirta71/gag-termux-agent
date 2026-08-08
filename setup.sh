@@ -13,9 +13,12 @@ echo "=========================================="
 echo " GAG Auto-Reconnect — install otomatis"
 echo "=========================================="
 
-echo "[1/6] Update + install nodejs & git..."
-yes | pkg update >/dev/null 2>&1 || true
-yes | pkg install nodejs git >/dev/null 2>&1 || pkg install -y nodejs git
+echo "[1/6] Upgrade paket + install nodejs & git..."
+# pkg upgrade WAJIB (bukan cuma update) biar openssl sinkron sama node,
+# kalau nggak: error "OSSL_PROVIDER_add_conf_parameter".
+yes | pkg update -y >/dev/null 2>&1 || true
+yes | pkg upgrade -y >/dev/null 2>&1 || true
+yes | pkg install nodejs git openssl >/dev/null 2>&1 || pkg install -y nodejs git openssl
 
 echo "[2/6] Ambil kode agent..."
 if [ -d "$DIR/.git" ]; then
