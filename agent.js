@@ -236,16 +236,28 @@ function st(userId) {
   return state.get(userId);
 }
 
+// nama akun yang enak dibaca (nama > userId)
+function disp(acc) {
+  return acc.label || acc.username || acc.userId;
+}
+// ambil kode/alasan singkat dari baris logcat mentah
+function reasonFromLine(line) {
+  const m = line.match(/reason:?\s*(\d+)/i) || line.match(/error ?code[: ]*(\d+)/i) || line.match(/\b(26\d|27\d|51\d|52\d|61\d)\b/);
+  return m ? `error ${m[1]}` : "disconnect";
+}
+
 async function doRelaunch(cfg, acc, session, s, reason) {
   s.lastRelaunchAt = Date.now();
+  const nm = disp(acc);
   const running = await isRunning(acc.package);
   const url = buildDeeplink(acc, session);
-  log(`🔄 Relaunch ${acc.userId} (${reason}) | proses ${running ? "hidup(stuck)" : "mati"} | ${url}`);
+  const dest = acc.joinMode === "share" ? "private server" : "market";
+  log(`🔄 [${nm}] buka ulang → ${dest}${running ? " (nutup Roblox yg nyangkut)" : ""}`);
   await forceStop(acc.package);
   await new Promise((r) => setTimeout(r, 2500));
   const r = await launchDeeplink(url);
-  if (r.code !== 0) log(`   ❌ gagal launch: ${r.err || r.out || "code " + r.code}`);
-  else log(`   ▶️  launched, tunggu heartbeat balik (~1-2 menit)`);
+  if (r.code !== 0) log(`❌ [${nm}] gagal buka Roblox (${r.err || r.out || "code " + r.code})`);
+  else log(`▶️ [${nm}] Roblox dibuka, nunggu masuk game…`);
 }
 
 // ---------- deteksi lokal (baca logcat tag Roblox) ----------
@@ -287,10 +299,10 @@ async function checkLocalErrors(cfg, accounts, sessions) {
   if (s.retries > cfg.maxRetries) {
     s.pausedUntil = now + cfg.backoffMs;
     s.retries = 0;
-    log(`⛔ ${target.userId} relaunch beruntun kebanyakan — jeda ${Math.round(cfg.backoffMs / 60000)} menit`);
+    log(`⛔ [${disp(target)}] gagal terus ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
     return;
   }
-  log(`🔎 Deteksi lokal: error → relaunch ${target.userId} | ${errLine.slice(-80)}`);
+  log(`🔎 [${disp(target)}] ${reasonFromLine(errLine)} kebaca dari Roblox → buka ulang`);
   s.offlineSince = 0;
   await doRelaunch(cfg, target, sessions[String(target.userId)], s, "deteksi lokal");
 }
@@ -311,7 +323,7 @@ async function handleAccount(cfg, acc, sessions) {
     if (s.retries > cfg.maxRetries) {
       s.pausedUntil = now + cfg.backoffMs;
       s.retries = 0;
-      log(`⛔ ${acc.userId} relaunch beruntun kebanyakan — jeda ${Math.round(cfg.backoffMs / 60000)} menit`);
+      log(`⛔ [${disp(acc)}] gagal terus ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
       return;
     }
     s.offlineSince = 0;
@@ -320,7 +332,7 @@ async function handleAccount(cfg, acc, sessions) {
   }
 
   if (online) {
-    if (s.offlineSince || s.retries) log(`✅ ${acc.userId} online lagi (server ${session.jobId || "-"})`);
+    if (s.offlineSince || s.retries) log(`✅ [${disp(acc)}] online · server ${(session.jobId || "-").slice(0, 8)}`);
     s.offlineSince = 0;
     s.retries = 0;
     s.pausedUntil = 0;
@@ -329,7 +341,7 @@ async function handleAccount(cfg, acc, sessions) {
 
   if (!s.offlineSince) {
     s.offlineSince = now;
-    log(`⚠️  ${acc.userId} heartbeat putus (DC/FC/crash/kick?) — mulai hitung grace`);
+    log(`⚠️ [${disp(acc)}] koneksi putus — cek dulu…`);
     return;
   }
 
@@ -340,12 +352,12 @@ async function handleAccount(cfg, acc, sessions) {
   if (s.retries >= cfg.maxRetries) {
     s.pausedUntil = now + cfg.backoffMs;
     s.retries = 0;
-    log(`⛔ ${acc.userId} udah ${cfg.maxRetries}x relaunch tetep gagal — jeda ${Math.round(cfg.backoffMs / 60000)} menit`);
+    log(`⛔ [${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
     return;
   }
 
   if (fs.existsSync(PAUSE_FILE)) {
-    log(`⏸️  PAUSE aktif — skip relaunch ${acc.userId}`);
+    log(`⏸️ [${disp(acc)}] dijeda (PAUSE aktif)`);
     return;
   }
 
@@ -355,20 +367,33 @@ async function handleAccount(cfg, acc, sessions) {
 
 // ---------- main loop ----------
 let running = true;
+let netDown = false; // biar log "internet putus" ga spam tiap 5s
+let noAcctWarned = false;
 async function tick(cfg, deviceId) {
   let sessions, accounts;
   try {
     sessions = await fetchSessions(cfg);
-  } catch (e) {
-    log(`⚠️  gagal ambil /api/sessions: ${e.message}`);
+    if (netDown) {
+      netDown = false;
+      log("📶 Internet HP balik — lanjut mantau");
+    }
+  } catch {
+    if (!netDown) {
+      netDown = true;
+      log("📡 Internet HP putus — nunggu koneksi balik…");
+    }
     return;
   }
   accounts = await fetchAccounts(cfg, deviceId);
   await reportDevice(cfg, deviceId, accounts);
   if (!accounts.length) {
-    log("ℹ️  belum ada akun ditugasin ke device ini (tambah dari dashboard)");
+    if (!noAcctWarned) {
+      noAcctWarned = true;
+      log("ℹ️ Belum ada akun buat device ini — tambah dari dashboard (menu Reconnect)");
+    }
     return;
   }
+  noAcctWarned = false;
   // deteksi lokal dulu (relaunch cepat walau heartbeat masih keliatan online)
   try {
     await checkLocalErrors(cfg, accounts, sessions);
@@ -387,14 +412,14 @@ async function tick(cfg, deviceId) {
 async function main() {
   const cfg = loadConfig();
   const deviceId = getDeviceId(cfg);
-  log("=== GAG Auto-Reconnect Agent ===");
-  log(`API: ${cfg.apiBase} | device: ${deviceId} | poll ${cfg.pollMs / 1000}s`);
+  log("🚀 GAG Auto-Reconnect aktif");
+  log(`📱 Device: ${deviceId} · cek tiap ${cfg.pollMs / 1000} detik`);
 
   if (!(await checkRoot())) {
-    log("❌ Root ga kedeteksi (su gagal). Grant root ke Termux dulu. Keluar.");
+    log("❌ Root belum aktif — kasih izin root ke Termux dulu, terus jalanin lagi");
     process.exit(1);
   }
-  log("🔓 Root OK");
+  log("🔓 Root OK · siap mantau");
   lastLogEpoch = Date.now() / 1000; // baseline: abaikan log lama, cuma proses yang baru
 
   process.on("SIGINT", () => {
