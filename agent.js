@@ -43,7 +43,7 @@ function loadConfig() {
   cfg.loadingPatienceMs = cfg.loadingPatienceMs ?? 90000; // proses hidup tp offline = loading, sabar segini
   cfg.maxRetries = cfg.maxRetries ?? 5;
   cfg.backoffMs = cfg.backoffMs ?? 600000;
-  cfg.localDetect = cfg.localDetect ?? true;
+  cfg.localDetect = cfg.localDetect ?? false; // logcat OFF default (berat, bikin stutter FPS; redundant sama signal)
   cfg.accounts = cfg.accounts ?? [];
   return cfg;
 }
@@ -89,9 +89,14 @@ async function checkRoot() {
   return r.code === 0 && r.out.trim() === "0";
 }
 
+const procCache = new Map(); // pkg -> { ts, alive } — hindari pidof dobel dlm 1 tick
 async function isRunning(pkg) {
+  const c = procCache.get(pkg);
+  if (c && Date.now() - c.ts < 3000) return c.alive; // pakai hasil barusan (masih dlm tick sama)
   const r = await su(`pidof ${pkg}`);
-  return r.code === 0 && r.out.length > 0;
+  const alive = r.code === 0 && r.out.length > 0;
+  procCache.set(pkg, { ts: Date.now(), alive });
+  return alive;
 }
 
 async function forceStop(pkg) {
