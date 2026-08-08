@@ -249,11 +249,9 @@ async function doRelaunch(cfg, acc, session, s, reason) {
 }
 
 // ---------- deteksi lokal (baca logcat tag Roblox) ----------
-// Kode yang HARUS rejoin (putus sementara / server)
-const RE_REJOIN = /disconnected|lost connection|connection lost|reconnect|\b(260|274|276|277|279|517|610)\b/i;
-// Kode yang JANGAN rejoin (ban/kick/moderasi/dobel-device) — biar ga loop
-const RE_BAN = /\bbanned\b|moderat|kicked|\b(264|267|268|273|523|524)\b/i;
-// Sinyal "berhenti wajar" (background/pindah app) — BUKAN DC beneran, di-skip
+// Semua error/disconnect → relog (sesuai permintaan). Backoff yang jadi rem.
+const RE_ERROR = /disconnected|lost connection|connection lost|reconnect|error code|\b(260|264|267|268|273|274|276|277|279|517|522|523|524|610|770|771|772|773)\b/i;
+// Sinyal "berhenti wajar" (background/pindah app/teleport) — BUKAN DC, di-skip
 const RE_GRACE = /stop\(\) called|pause game session|leaving game|teleport/i;
 
 let lastLogEpoch = 0; // detik epoch log terakhir yg diproses
@@ -263,19 +261,18 @@ async function checkLocalErrors(cfg, accounts, sessions) {
   if (r.code !== 0 || !r.out) return;
 
   let maxTs = lastLogEpoch;
-  let banLine = null;
-  let rejoinLine = null;
+  let errLine = null;
   for (const ln of r.out.split("\n")) {
     const m = ln.match(/^\s*(\d+\.\d+)\s/);
     if (!m) continue;
     const ts = parseFloat(m[1]);
     if (ts > maxTs) maxTs = ts;
     if (ts <= lastLogEpoch) continue; // baris lama, skip
-    if (RE_GRACE.test(ln)) continue; // background/leave → bukan DC
-    if (RE_BAN.test(ln)) banLine = ln;
-    else if (RE_REJOIN.test(ln)) rejoinLine = ln;
+    if (RE_GRACE.test(ln)) continue; // background/leave/teleport → bukan DC
+    if (RE_ERROR.test(ln)) errLine = ln;
   }
   lastLogEpoch = maxTs;
+  if (!errLine) return;
 
   // target: 1 device = 1 akun → ambil akun aktif pertama
   const target = accounts.find((a) => a.enabled) || accounts[0];
@@ -283,21 +280,19 @@ async function checkLocalErrors(cfg, accounts, sessions) {
   const s = st(target.userId);
   const now = Date.now();
 
-  if (banLine) {
-    log(`⛔ Deteksi lokal: ban/kick → STOP ${target.userId} | ${banLine.slice(-80)}`);
-    await forceStop(target.package || "com.roblox.client");
-    s.pausedUntil = now + cfg.backoffMs; // jangan relaunch
-    if (target.id) await apiPost(cfg, `/api/agent/accounts/${target.id}/command`, { command: "stop" });
+  if (fs.existsSync(PAUSE_FILE)) return;
+  if (s.pausedUntil && now < s.pausedUntil) return;
+  if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru aja relaunch
+  s.retries = (s.retries || 0) + 1;
+  if (s.retries > cfg.maxRetries) {
+    s.pausedUntil = now + cfg.backoffMs;
+    s.retries = 0;
+    log(`⛔ ${target.userId} relaunch beruntun kebanyakan — jeda ${Math.round(cfg.backoffMs / 60000)} menit`);
     return;
   }
-  if (rejoinLine) {
-    if (fs.existsSync(PAUSE_FILE)) return;
-    if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru aja relaunch
-    log(`🔎 Deteksi lokal: DC → relaunch cepat ${target.userId} | ${rejoinLine.slice(-80)}`);
-    s.offlineSince = 0;
-    s.retries = (s.retries || 0) + 1;
-    await doRelaunch(cfg, target, sessions[String(target.userId)], s, "deteksi lokal");
-  }
+  log(`🔎 Deteksi lokal: error → relaunch ${target.userId} | ${errLine.slice(-80)}`);
+  s.offlineSince = 0;
+  await doRelaunch(cfg, target, sessions[String(target.userId)], s, "deteksi lokal");
 }
 
 async function handleAccount(cfg, acc, sessions) {
@@ -306,15 +301,21 @@ async function handleAccount(cfg, acc, sessions) {
   const session = sessions[String(acc.userId)];
   const online = !!(session && session.online);
 
-  // perintah dari dashboard: relaunch paksa (one-shot)
+  // perintah relaunch (dari dashboard ATAU signal error dari script)
   if (acc.pendingCommand === "relaunch") {
-    if (!fs.existsSync(PAUSE_FILE)) {
-      s.offlineSince = 0;
+    if (acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`); // konsumsi flag
+    if (fs.existsSync(PAUSE_FILE)) return;
+    if (s.pausedUntil && now < s.pausedUntil) return;
+    if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru relaunch → abaikan dobel
+    s.retries = (s.retries || 0) + 1;
+    if (s.retries > cfg.maxRetries) {
+      s.pausedUntil = now + cfg.backoffMs;
       s.retries = 0;
-      s.pausedUntil = 0;
-      await doRelaunch(cfg, acc, session, s, "perintah web");
+      log(`⛔ ${acc.userId} relaunch beruntun kebanyakan — jeda ${Math.round(cfg.backoffMs / 60000)} menit`);
+      return;
     }
-    if (acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`);
+    s.offlineSince = 0;
+    await doRelaunch(cfg, acc, session, s, "signal error");
     return;
   }
 
