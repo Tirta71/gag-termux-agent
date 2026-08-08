@@ -1,3 +1,5 @@
 node_modules/
 agent.log
 PAUSE
+config.json
+device.json

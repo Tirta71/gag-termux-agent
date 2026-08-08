@@ -23,6 +23,7 @@ fi
 cd "$DIR"
 
 echo "[3/6] Setup API key..."
+[ -f config.json ] || cp config.example.json config.json
 NEED_KEY=1
 if [ -f config.json ] && ! grep -q "PASTE_REPORT_API_KEY_DISINI" config.json; then
   printf "    Config udah ada API key. Ganti? (y/N): "
