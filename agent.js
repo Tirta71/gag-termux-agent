@@ -39,8 +39,8 @@ function log(...a) {
 function loadConfig() {
   const cfg = JSON.parse(fs.readFileSync(CFG_PATH, "utf8"));
   cfg.pollMs = cfg.pollMs ?? 5000;
-  cfg.offlineGraceMs = cfg.offlineGraceMs ?? 8000;
-  cfg.relaunchCooldownMs = cfg.relaunchCooldownMs ?? 120000;
+  cfg.launchSettleMs = cfg.launchSettleMs ?? 15000; // jeda boot habis relaunch (jgn dobel)
+  cfg.loadingPatienceMs = cfg.loadingPatienceMs ?? 90000; // proses hidup tp offline = loading, sabar segini
   cfg.maxRetries = cfg.maxRetries ?? 5;
   cfg.backoffMs = cfg.backoffMs ?? 600000;
   cfg.localDetect = cfg.localDetect ?? true;
@@ -304,7 +304,7 @@ async function checkLocalErrors(cfg, accounts, sessions) {
   if (target.suppressUntil && now < target.suppressUntil) return; // lagi teleport/relocate
   if (fs.existsSync(PAUSE_FILE)) return;
   if (s.pausedUntil && now < s.pausedUntil) return;
-  if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru aja relaunch
+  if (now - s.lastRelaunchAt < cfg.launchSettleMs) return; // baru aja relaunch, kasih waktu boot
   s.retries = (s.retries || 0) + 1;
   if (s.retries > cfg.maxRetries) {
     s.pausedUntil = now + cfg.backoffMs;
@@ -317,93 +317,68 @@ async function checkLocalErrors(cfg, accounts, sessions) {
   await doRelaunch(cfg, target, sessions[String(target.userId)], s, "deteksi lokal");
 }
 
+// Keputusan berdasarkan KONDISI NYATA (bukan timer buta):
+//  - proses mati (close/crash/launch gagal) → buka ulang
+//  - proses hidup + offline → lagi loading/join, sabar sampai loadingPatience; kelamaan → buka ulang
+//  - proses hidup + online → sehat
 async function handleAccount(cfg, acc, sessions) {
   const now = Date.now();
   const s = st(acc.userId);
   const session = sessions[String(acc.userId)];
   const online = !!(session && session.online);
   const suppressed = acc.suppressUntil && now < acc.suppressUntil; // lagi teleport/relocate
+  const sinceLaunch = s.lastRelaunchAt ? now - s.lastRelaunchAt : Infinity;
+  const forced = acc.pendingCommand === "relaunch"; // web Rejoin / signal error
+  if (forced && acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`);
 
-  // perintah relaunch (dari dashboard ATAU signal error dari script)
-  if (acc.pendingCommand === "relaunch") {
-    if (acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`); // konsumsi flag
-    if (suppressed) return; // lagi teleport → jgn relog
-    if (fs.existsSync(PAUSE_FILE)) return;
-    if (s.pausedUntil && now < s.pausedUntil) return;
-    if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru relaunch → abaikan dobel
-    s.retries = (s.retries || 0) + 1;
-    if (s.retries > cfg.maxRetries) {
-      s.pausedUntil = now + cfg.backoffMs;
-      s.retries = 0;
-      log(`⛔ [${disp(acc)}] gagal terus ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
-      return;
-    }
+  // hal-hal yang bikin agent diem
+  if (suppressed) {
     s.offlineSince = 0;
-    await doRelaunch(cfg, acc, session, s, "signal error");
+    if (online) { s.retries = 0; s.pausedUntil = 0; }
     return;
   }
+  if (fs.existsSync(PAUSE_FILE)) return;
+  if (s.pausedUntil && now < s.pausedUntil) return;
+  if (sinceLaunch < cfg.launchSettleMs) return; // baru relaunch → kasih waktu Roblox boot
 
-  // FAST PATH: proses Roblox mati (di-close/crash/FC) → relaunch cepat, ga nunggu heartbeat.
-  // (root bisa cek proses langsung; teleport/relocate ga matiin proses jadi aman)
-  if (
-    !suppressed &&
-    !fs.existsSync(PAUSE_FILE) &&
-    !(s.pausedUntil && now < s.pausedUntil) &&
-    now - s.lastRelaunchAt > cfg.relaunchCooldownMs
-  ) {
-    const alive = await isRunning(acc.package || "com.roblox.client");
-    if (!alive) {
-      s.retries = (s.retries || 0) + 1;
-      if (s.retries > cfg.maxRetries) {
-        s.pausedUntil = now + cfg.backoffMs;
-        s.retries = 0;
-        log(`⛔ [${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
-        return;
-      }
-      log(`🔌 [${disp(acc)}] Roblox ketutup/crash → buka ulang`);
-      s.offlineSince = 0;
-      await doRelaunch(cfg, acc, session, s, "proses mati");
-      return;
-    }
-  }
+  const alive = await isRunning(acc.package || "com.roblox.client");
 
-  if (online) {
-    if (s.offlineSince || s.retries) log(`✅ [${disp(acc)}] online · server ${(session.jobId || "-").slice(0, 8)}`);
+  // sehat: online + proses hidup
+  if (online && alive) {
+    if (s.offlineSince || s.retries) log(`[${disp(acc)}] online · server ${(session.jobId || "-").slice(0, 8)}`);
     s.offlineSince = 0;
     s.retries = 0;
     s.pausedUntil = 0;
     return;
   }
 
-  if (suppressed) {
-    s.offlineSince = 0; // lagi teleport/relocate → jgn dihitung putus
-    return;
+  // tentukan alasan buka ulang
+  let reason;
+  if (!alive) {
+    reason = "Roblox mati (ketutup/crash)"; // proses mati → langsung
+  } else if (forced) {
+    reason = "perintah relog"; // dipaksa web/signal, proses hidup
+  } else {
+    // proses hidup tapi offline = lagi loading/join → sabar
+    if (!s.offlineSince) {
+      s.offlineSince = now;
+      log(`[${disp(acc)}] koneksi putus — cek dulu…`);
+      return;
+    }
+    if (now - s.offlineSince < cfg.loadingPatienceMs) return; // masih wajar loading
+    reason = "nyangkut kelamaan";
   }
 
-  if (!s.offlineSince) {
-    s.offlineSince = now;
-    log(`⚠️ [${disp(acc)}] koneksi putus — cek dulu…`);
-    return;
-  }
-
-  if (s.pausedUntil && now < s.pausedUntil) return;
-  if (now - s.offlineSince < cfg.offlineGraceMs) return;
-  if (s.lastRelaunchAt && now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return;
-
-  if (s.retries >= cfg.maxRetries) {
+  s.retries = (s.retries || 0) + 1;
+  if (s.retries > cfg.maxRetries) {
     s.pausedUntil = now + cfg.backoffMs;
     s.retries = 0;
-    log(`⛔ [${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
+    log(`[${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
     return;
   }
-
-  if (fs.existsSync(PAUSE_FILE)) {
-    log(`⏸️ [${disp(acc)}] dijeda (PAUSE aktif)`);
-    return;
-  }
-
-  s.retries++;
-  await doRelaunch(cfg, acc, session, s, `percobaan ${s.retries}/${cfg.maxRetries}`);
+  log(`[${disp(acc)}] ${reason} → buka ulang`);
+  s.offlineSince = 0;
+  await doRelaunch(cfg, acc, session, s, reason);
 }
 
 // ---------- main loop ----------
