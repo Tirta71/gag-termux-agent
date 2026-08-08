@@ -261,8 +261,9 @@ async function doRelaunch(cfg, acc, session, s, reason) {
 }
 
 // ---------- deteksi lokal (baca logcat tag Roblox) ----------
-// Semua error/disconnect → relog (sesuai permintaan). Backoff yang jadi rem.
-const RE_ERROR = /disconnected|lost connection|connection lost|error code|\b(260|264|267|268|273|274|276|277|279|517|522|523|524|610)\b/i;
+// HARUS pakai konteks kata — JANGAN match angka polos (Roblox nyetak byk angka di log
+// statistik spt "tbeat sc_count 7..." → false positive). Cuma baris disconnect asli yg kena.
+const RE_ERROR = /disconnected|lost connection|connection lost|sending disconnect|disconnect with reason|failed to connect|error ?code[:=\s]*\d+/i;
 // Sinyal yang BUKAN disconnect → di-skip (background, pindah app, teleport gagal/full 769-773)
 const RE_GRACE = /stop\(\) called|pause game session|leaving game|teleport|server is full|game is full|restricted|\b(769|770|771|772|773)\b/i;
 
@@ -292,6 +293,7 @@ async function checkLocalErrors(cfg, accounts, sessions) {
   const s = st(target.userId);
   const now = Date.now();
 
+  if (target.suppressUntil && now < target.suppressUntil) return; // lagi teleport/relocate
   if (fs.existsSync(PAUSE_FILE)) return;
   if (s.pausedUntil && now < s.pausedUntil) return;
   if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru aja relaunch
@@ -312,10 +314,12 @@ async function handleAccount(cfg, acc, sessions) {
   const s = st(acc.userId);
   const session = sessions[String(acc.userId)];
   const online = !!(session && session.online);
+  const suppressed = acc.suppressUntil && now < acc.suppressUntil; // lagi teleport/relocate
 
   // perintah relaunch (dari dashboard ATAU signal error dari script)
   if (acc.pendingCommand === "relaunch") {
     if (acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`); // konsumsi flag
+    if (suppressed) return; // lagi teleport → jgn relog
     if (fs.existsSync(PAUSE_FILE)) return;
     if (s.pausedUntil && now < s.pausedUntil) return;
     if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru relaunch → abaikan dobel
@@ -336,6 +340,11 @@ async function handleAccount(cfg, acc, sessions) {
     s.offlineSince = 0;
     s.retries = 0;
     s.pausedUntil = 0;
+    return;
+  }
+
+  if (suppressed) {
+    s.offlineSince = 0; // lagi teleport/relocate → jgn dihitung putus
     return;
   }
 
