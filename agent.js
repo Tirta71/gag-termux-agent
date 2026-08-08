@@ -21,9 +21,14 @@ const DEVICE_PATH = path.join(__dirname, "device.json");
 const PAUSE_FILE = path.join(__dirname, "PAUSE"); // kill-switch: bikin file ini buat stop semua relaunch
 
 // ---------- util ----------
+const logQueue = []; // baris log yang belum dikirim ke API
 function log(...a) {
-  const t = new Date().toLocaleString("id-ID", { hour12: false });
-  console.log(`[${t}]`, ...a);
+  const now = Date.now();
+  const t = new Date(now).toLocaleString("id-ID", { hour12: false });
+  const msg = a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
+  console.log(`[${t}]`, msg);
+  logQueue.push({ t: now, m: msg });
+  if (logQueue.length > 200) logQueue.splice(0, logQueue.length - 200);
 }
 
 function loadConfig() {
@@ -175,13 +180,17 @@ async function reportDevice(cfg, deviceId, accounts) {
     running,
     accounts: accounts.length,
   };
+  const pending = logQueue.splice(0, logQueue.length); // kirim log baru
+  if (pending.length) body.logs = pending;
   try {
     await fetch(`${cfg.apiBase}/api/agent/device`, {
       method: "POST",
       headers: { "x-api-key": cfg.apiKey, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  } catch {}
+  } catch {
+    if (pending.length) logQueue.unshift(...pending); // gagal → balikin biar dikirim lagi
+  }
 }
 
 // ---------- API ----------
