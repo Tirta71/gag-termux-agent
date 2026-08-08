@@ -105,6 +105,85 @@ function buildDeeplink(acc, session) {
   return `roblox://placeId=${pid}`;
 }
 
+// ---------- metrics device ----------
+function readMemMB() {
+  try {
+    const t = fs.readFileSync("/proc/meminfo", "utf8");
+    const total = /MemTotal:\s+(\d+)/.exec(t);
+    const avail = /MemAvailable:\s+(\d+)/.exec(t);
+    const totalMb = total ? Math.round(+total[1] / 1024) : 0;
+    const freeMb = avail ? Math.round(+avail[1] / 1024) : 0;
+    return { total: totalMb, free: freeMb, used: Math.max(0, totalMb - freeMb) };
+  } catch {
+    return { total: 0, free: 0, used: 0 };
+  }
+}
+
+function cpuSnapshot() {
+  try {
+    const line = fs.readFileSync("/proc/stat", "utf8").split("\n")[0];
+    const p = line.trim().split(/\s+/).slice(1).map(Number);
+    const idle = (p[3] || 0) + (p[4] || 0);
+    const total = p.reduce((a, b) => a + (b || 0), 0);
+    return { idle, total };
+  } catch {
+    return { idle: 0, total: 0 };
+  }
+}
+
+async function readCpuPct() {
+  const a = cpuSnapshot();
+  await new Promise((r) => setTimeout(r, 250));
+  const b = cpuSnapshot();
+  const dt = b.total - a.total;
+  const di = b.idle - a.idle;
+  if (dt <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round(((dt - di) / dt) * 100)));
+}
+
+async function getProp(name) {
+  const r = await sh(`getprop ${name}`);
+  return r.out || null;
+}
+
+let deviceMeta = null; // model + android (cache, ga berubah)
+async function reportDevice(cfg, deviceId, accounts) {
+  if (!deviceMeta) {
+    deviceMeta = {
+      model: await getProp("ro.product.model"),
+      android: await getProp("ro.build.version.release"),
+    };
+  }
+  const mem = readMemMB();
+  const cpu = await readCpuPct();
+  let running = 0;
+  const seen = new Set();
+  for (const a of accounts) {
+    const pkg = a.package || "com.roblox.client";
+    if (seen.has(pkg)) continue;
+    seen.add(pkg);
+    if (await isRunning(pkg)) running++;
+  }
+  const body = {
+    deviceId,
+    model: deviceMeta.model,
+    android: deviceMeta.android,
+    cpu,
+    ramUsed: mem.used,
+    ramFree: mem.free,
+    ramTotal: mem.total,
+    running,
+    accounts: accounts.length,
+  };
+  try {
+    await fetch(`${cfg.apiBase}/api/agent/device`, {
+      method: "POST",
+      headers: { "x-api-key": cfg.apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {}
+}
+
 // ---------- API ----------
 async function apiGet(cfg, path) {
   const res = await fetch(`${cfg.apiBase}${path}`, { headers: { "x-api-key": cfg.apiKey } });
@@ -218,6 +297,7 @@ async function tick(cfg, deviceId) {
     return;
   }
   accounts = await fetchAccounts(cfg, deviceId);
+  await reportDevice(cfg, deviceId, accounts);
   if (!accounts.length) {
     log("ℹ️  belum ada akun ditugasin ke device ini (tambah dari dashboard)");
     return;
