@@ -335,6 +335,30 @@ async function handleAccount(cfg, acc, sessions) {
     return;
   }
 
+  // FAST PATH: proses Roblox mati (di-close/crash/FC) → relaunch cepat, ga nunggu heartbeat.
+  // (root bisa cek proses langsung; teleport/relocate ga matiin proses jadi aman)
+  if (
+    !suppressed &&
+    !fs.existsSync(PAUSE_FILE) &&
+    !(s.pausedUntil && now < s.pausedUntil) &&
+    now - s.lastRelaunchAt > cfg.relaunchCooldownMs
+  ) {
+    const alive = await isRunning(acc.package || "com.roblox.client");
+    if (!alive) {
+      s.retries = (s.retries || 0) + 1;
+      if (s.retries > cfg.maxRetries) {
+        s.pausedUntil = now + cfg.backoffMs;
+        s.retries = 0;
+        log(`⛔ [${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
+        return;
+      }
+      log(`🔌 [${disp(acc)}] Roblox ketutup/crash → buka ulang`);
+      s.offlineSince = 0;
+      await doRelaunch(cfg, acc, session, s, "proses mati");
+      return;
+    }
+  }
+
   if (online) {
     if (s.offlineSince || s.retries) log(`✅ [${disp(acc)}] online · server ${(session.jobId || "-").slice(0, 8)}`);
     s.offlineSince = 0;
