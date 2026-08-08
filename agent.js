@@ -412,6 +412,14 @@ async function tick(cfg, deviceId) {
     return;
   }
   accounts = await fetchAccounts(cfg, deviceId);
+  // dedupe per userId (hindari 2 entri userId sama saling berantem stop/relaunch).
+  // prioritas yang enabled.
+  const byUser = new Map();
+  for (const a of accounts) {
+    const ex = byUser.get(a.userId);
+    if (!ex || (a.enabled !== false && ex.enabled === false)) byUser.set(a.userId, a);
+  }
+  accounts = [...byUser.values()];
   await reportDevice(cfg, deviceId, accounts);
   if (!accounts.length) {
     if (!noAcctWarned) {
