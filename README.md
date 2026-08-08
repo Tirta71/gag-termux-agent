@@ -7,7 +7,7 @@ Roblox dan join balik ke server yang bener.
 Daftar akun **diatur dari dashboard** (menu Reconnect) — `config.json` di HP cuma nyimpen
 API key + device ID. Nambah/ubah akun, ganti server, tombol relaunch: semua dari web.
 
-##Command light
+#Command light
 ```
 nohup node ~/gag-agent/agent.js > ~/gag-agent/agent.log 2>&1 &
 ```
