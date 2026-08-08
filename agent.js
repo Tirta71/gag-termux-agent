@@ -33,8 +33,8 @@ function log(...a) {
 
 function loadConfig() {
   const cfg = JSON.parse(fs.readFileSync(CFG_PATH, "utf8"));
-  cfg.pollMs = cfg.pollMs ?? 10000;
-  cfg.offlineGraceMs = cfg.offlineGraceMs ?? 45000;
+  cfg.pollMs = cfg.pollMs ?? 5000;
+  cfg.offlineGraceMs = cfg.offlineGraceMs ?? 8000;
   cfg.relaunchCooldownMs = cfg.relaunchCooldownMs ?? 120000;
   cfg.maxRetries = cfg.maxRetries ?? 5;
   cfg.backoffMs = cfg.backoffMs ?? 600000;
