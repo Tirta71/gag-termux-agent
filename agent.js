@@ -295,8 +295,8 @@ async function checkLocalErrors(cfg, accounts, sessions) {
   lastLogEpoch = maxTs;
   if (!errLine) return;
 
-  // target: 1 device = 1 akun → ambil akun aktif pertama
-  const target = accounts.find((a) => a.enabled) || accounts[0];
+  // target: 1 device = 1 akun → ambil akun aktif pertama (skip yg nonaktif)
+  const target = accounts.find((a) => a.enabled !== false);
   if (!target) return;
   const s = st(target.userId);
   const now = Date.now();
@@ -330,6 +330,17 @@ async function handleAccount(cfg, acc, sessions) {
   const sinceLaunch = s.lastRelaunchAt ? now - s.lastRelaunchAt : Infinity;
   const forced = acc.pendingCommand === "relaunch"; // web Rejoin / signal error
   if (forced && acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`);
+
+  // NONAKTIF (Stop): tutup Roblox & jgn ngapa-ngapain
+  if (acc.enabled === false) {
+    if (!s.stopped) {
+      s.stopped = true;
+      log(`[${disp(acc)}] dinonaktifkan — tutup Roblox`);
+      await forceStop(acc.package || "com.roblox.client");
+    }
+    return;
+  }
+  if (s.stopped) s.stopped = false; // di-Start lagi
 
   // hal-hal yang bikin agent diem
   if (suppressed) {
