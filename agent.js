@@ -38,6 +38,7 @@ function loadConfig() {
   cfg.relaunchCooldownMs = cfg.relaunchCooldownMs ?? 120000;
   cfg.maxRetries = cfg.maxRetries ?? 5;
   cfg.backoffMs = cfg.backoffMs ?? 600000;
+  cfg.localDetect = cfg.localDetect ?? true;
   cfg.accounts = cfg.accounts ?? [];
   return cfg;
 }
@@ -200,9 +201,13 @@ async function apiGet(cfg, path) {
   return res.json();
 }
 
-async function apiPost(cfg, path) {
+async function apiPost(cfg, path, body) {
   try {
-    await fetch(`${cfg.apiBase}${path}`, { method: "POST", headers: { "x-api-key": cfg.apiKey } });
+    await fetch(`${cfg.apiBase}${path}`, {
+      method: "POST",
+      headers: { "x-api-key": cfg.apiKey, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
   } catch {}
 }
 
@@ -241,6 +246,58 @@ async function doRelaunch(cfg, acc, session, s, reason) {
   const r = await launchDeeplink(url);
   if (r.code !== 0) log(`   ❌ gagal launch: ${r.err || r.out || "code " + r.code}`);
   else log(`   ▶️  launched, tunggu heartbeat balik (~1-2 menit)`);
+}
+
+// ---------- deteksi lokal (baca logcat tag Roblox) ----------
+// Kode yang HARUS rejoin (putus sementara / server)
+const RE_REJOIN = /disconnected|lost connection|connection lost|reconnect|\b(260|274|276|277|279|517|610)\b/i;
+// Kode yang JANGAN rejoin (ban/kick/moderasi/dobel-device) — biar ga loop
+const RE_BAN = /\bbanned\b|moderat|kicked|\b(264|267|268|273|523|524)\b/i;
+// Sinyal "berhenti wajar" (background/pindah app) — BUKAN DC beneran, di-skip
+const RE_GRACE = /stop\(\) called|pause game session|leaving game|teleport/i;
+
+let lastLogEpoch = 0; // detik epoch log terakhir yg diproses
+async function checkLocalErrors(cfg, accounts, sessions) {
+  if (cfg.localDetect === false) return;
+  const r = await su("logcat -d -v epoch -t 500 -s Roblox");
+  if (r.code !== 0 || !r.out) return;
+
+  let maxTs = lastLogEpoch;
+  let banLine = null;
+  let rejoinLine = null;
+  for (const ln of r.out.split("\n")) {
+    const m = ln.match(/^\s*(\d+\.\d+)\s/);
+    if (!m) continue;
+    const ts = parseFloat(m[1]);
+    if (ts > maxTs) maxTs = ts;
+    if (ts <= lastLogEpoch) continue; // baris lama, skip
+    if (RE_GRACE.test(ln)) continue; // background/leave → bukan DC
+    if (RE_BAN.test(ln)) banLine = ln;
+    else if (RE_REJOIN.test(ln)) rejoinLine = ln;
+  }
+  lastLogEpoch = maxTs;
+
+  // target: 1 device = 1 akun → ambil akun aktif pertama
+  const target = accounts.find((a) => a.enabled) || accounts[0];
+  if (!target) return;
+  const s = st(target.userId);
+  const now = Date.now();
+
+  if (banLine) {
+    log(`⛔ Deteksi lokal: ban/kick → STOP ${target.userId} | ${banLine.slice(-80)}`);
+    await forceStop(target.package || "com.roblox.client");
+    s.pausedUntil = now + cfg.backoffMs; // jangan relaunch
+    if (target.id) await apiPost(cfg, `/api/agent/accounts/${target.id}/command`, { command: "stop" });
+    return;
+  }
+  if (rejoinLine) {
+    if (fs.existsSync(PAUSE_FILE)) return;
+    if (now - s.lastRelaunchAt < cfg.relaunchCooldownMs) return; // baru aja relaunch
+    log(`🔎 Deteksi lokal: DC → relaunch cepat ${target.userId} | ${rejoinLine.slice(-80)}`);
+    s.offlineSince = 0;
+    s.retries = (s.retries || 0) + 1;
+    await doRelaunch(cfg, target, sessions[String(target.userId)], s, "deteksi lokal");
+  }
 }
 
 async function handleAccount(cfg, acc, sessions) {
@@ -311,6 +368,12 @@ async function tick(cfg, deviceId) {
     log("ℹ️  belum ada akun ditugasin ke device ini (tambah dari dashboard)");
     return;
   }
+  // deteksi lokal dulu (relaunch cepat walau heartbeat masih keliatan online)
+  try {
+    await checkLocalErrors(cfg, accounts, sessions);
+  } catch (e) {
+    log(`⚠️  error deteksi lokal: ${e.message}`);
+  }
   for (const acc of accounts) {
     try {
       await handleAccount(cfg, acc, sessions);
@@ -331,6 +394,7 @@ async function main() {
     process.exit(1);
   }
   log("🔓 Root OK");
+  lastLogEpoch = Date.now() / 1000; // baseline: abaikan log lama, cuma proses yang baru
 
   process.on("SIGINT", () => {
     running = false;
