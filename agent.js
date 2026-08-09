@@ -41,6 +41,7 @@ function loadConfig() {
   cfg.pollMs = cfg.pollMs ?? 5000;
   cfg.launchSettleMs = cfg.launchSettleMs ?? 15000; // jeda boot habis relaunch (jgn dobel)
   cfg.loadingPatienceMs = cfg.loadingPatienceMs ?? 90000; // proses hidup tp offline = loading, sabar segini
+  cfg.deadConfirmMs = cfg.deadConfirmMs ?? 15000; // pas hop, proses "mati" sesaat itu wajar — konfirmasi dulu segini
   cfg.maxRetries = cfg.maxRetries ?? 5;
   cfg.backoffMs = cfg.backoffMs ?? 600000;
   cfg.localDetect = cfg.localDetect ?? false; // logcat OFF default (berat, bikin stutter FPS; redundant sama signal)
@@ -370,10 +371,17 @@ async function handleAccount(cfg, acc, sessions) {
   }
 
   const alive = await isRunning(acc.package || "com.roblox.client");
+  if (alive) s.deadSince = 0;
 
-  // PROSES MATI (ketutup/crash) → relaunch, WALAU lagi suppress/hop.
-  // (hop/teleport ga matiin proses — proses hidup terus. Mati = beneran ketutup/crash.)
+  // PROSES MATI (ketutup/crash) → relaunch. Berlaku juga pas lagi hop/suppress.
   if (!alive) {
+    // Pas hop, proses bisa "ilang" sesaat pas transisi teleport → konfirmasi dulu
+    // biar ga false relaunch tiap hop. Close beneran → tetep mati > deadConfirm.
+    if (suppressed) {
+      if (!s.deadSince) { s.deadSince = now; return; }
+      if (now - s.deadSince < cfg.deadConfirmMs) return;
+    }
+    s.deadSince = 0;
     s.retries = (s.retries || 0) + 1;
     if (s.retries > cfg.maxRetries) {
       s.pausedUntil = now + cfg.backoffMs;
@@ -391,8 +399,10 @@ async function handleAccount(cfg, acc, sessions) {
   if (suppressed) {
     s.offlineSince = 0;
     if (online) { s.retries = 0; s.pausedUntil = 0; }
+    if (!s.hopLogged) { s.hopLogged = true; log(`[${disp(acc)}] lagi hop server (buy cepat) — agent standby`); }
     return;
   }
+  if (s.hopLogged) { s.hopLogged = false; log(`[${disp(acc)}] selesai hop`); }
 
   // sehat: online + proses hidup
   if (online) {
