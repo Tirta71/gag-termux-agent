@@ -371,13 +371,13 @@ async function handleAccount(cfg, acc, sessions) {
   }
 
   const alive = await isRunning(acc.package || "com.roblox.client");
-  if (alive) s.deadSince = 0;
+  if (alive) { s.deadSince = 0; s.everAlive = true; }
 
   // PROSES MATI (ketutup/crash) → relaunch. Berlaku juga pas lagi hop/suppress.
   if (!alive) {
-    // Pas hop, proses bisa "ilang" sesaat pas transisi teleport → konfirmasi dulu
-    // biar ga false relaunch tiap hop. Close beneran → tetep mati > deadConfirm.
-    if (suppressed) {
+    // Konfirmasi 45s CUMA kalau proses PERNAH hidup (transisi hop bisa bikin ilang sesaat).
+    // Kalau dari awal mati (cold start / Roblox emang ketutup) → langsung buka, ga nunggu.
+    if (suppressed && s.everAlive) {
       if (!s.deadSince) { s.deadSince = now; return; }
       if (now - s.deadSince < cfg.deadConfirmMs) return;
     }
