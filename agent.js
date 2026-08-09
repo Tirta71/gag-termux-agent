@@ -351,17 +351,11 @@ async function handleAccount(cfg, acc, sessions) {
   }
   if (s.stopped) s.stopped = false; // di-Start lagi
 
-  // hal-hal yang bikin agent diem
-  if (suppressed) {
-    s.offlineSince = 0;
-    if (online) { s.retries = 0; s.pausedUntil = 0; }
-    return;
-  }
   if (fs.existsSync(PAUSE_FILE)) return;
   if (s.pausedUntil && now < s.pausedUntil) return;
   if (sinceLaunch < cfg.launchSettleMs) return; // baru relaunch → kasih waktu Roblox boot
 
-  // PAKSA (web Rejoin / Join server / signal): relaunch walau lagi online.
+  // PAKSA (web Rejoin / Join server / signal): relaunch walau online/suppress.
   if (forced) {
     s.retries = (s.retries || 0) + 1;
     if (s.retries > cfg.maxRetries) {
@@ -377,8 +371,31 @@ async function handleAccount(cfg, acc, sessions) {
 
   const alive = await isRunning(acc.package || "com.roblox.client");
 
+  // PROSES MATI (ketutup/crash) → relaunch, WALAU lagi suppress/hop.
+  // (hop/teleport ga matiin proses — proses hidup terus. Mati = beneran ketutup/crash.)
+  if (!alive) {
+    s.retries = (s.retries || 0) + 1;
+    if (s.retries > cfg.maxRetries) {
+      s.pausedUntil = now + cfg.backoffMs;
+      s.retries = 0;
+      log(`[${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
+      return;
+    }
+    log(`[${disp(acc)}] Roblox mati (ketutup/crash) → buka ulang`);
+    s.offlineSince = 0;
+    await doRelaunch(cfg, acc, session, s, "Roblox mati");
+    return;
+  }
+
+  // PROSES HIDUP + lagi teleport/hop (sniper) → biarin, jgn ganggu.
+  if (suppressed) {
+    s.offlineSince = 0;
+    if (online) { s.retries = 0; s.pausedUntil = 0; }
+    return;
+  }
+
   // sehat: online + proses hidup
-  if (online && alive) {
+  if (online) {
     if (s.offlineSince || s.retries) log(`[${disp(acc)}] online · server ${(session.jobId || "-").slice(0, 8)}`);
     s.offlineSince = 0;
     s.retries = 0;
@@ -386,21 +403,13 @@ async function handleAccount(cfg, acc, sessions) {
     return;
   }
 
-  // tentukan alasan buka ulang
-  let reason;
-  if (!alive) {
-    reason = "Roblox mati (ketutup/crash)"; // proses mati → langsung
-  } else {
-    // proses hidup tapi offline = lagi loading/join → sabar
-    if (!s.offlineSince) {
-      s.offlineSince = now;
-      log(`[${disp(acc)}] koneksi putus — cek dulu…`);
-      return;
-    }
-    if (now - s.offlineSince < cfg.loadingPatienceMs) return; // masih wajar loading
-    reason = "nyangkut kelamaan";
+  // proses hidup tapi offline = lagi loading/join → sabar sampai patience
+  if (!s.offlineSince) {
+    s.offlineSince = now;
+    log(`[${disp(acc)}] koneksi putus — cek dulu…`);
+    return;
   }
-
+  if (now - s.offlineSince < cfg.loadingPatienceMs) return; // masih wajar loading
   s.retries = (s.retries || 0) + 1;
   if (s.retries > cfg.maxRetries) {
     s.pausedUntil = now + cfg.backoffMs;
@@ -408,9 +417,9 @@ async function handleAccount(cfg, acc, sessions) {
     log(`[${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
     return;
   }
-  log(`[${disp(acc)}] ${reason} → buka ulang`);
+  log(`[${disp(acc)}] nyangkut kelamaan → buka ulang`);
   s.offlineSince = 0;
-  await doRelaunch(cfg, acc, session, s, reason);
+  await doRelaunch(cfg, acc, session, s, "nyangkut kelamaan");
 }
 
 // ---------- main loop ----------
