@@ -259,12 +259,15 @@ function reasonFromLine(line) {
   return m ? `error ${m[1]}` : "disconnect";
 }
 
-async function doRelaunch(cfg, acc, session, s, reason) {
+async function doRelaunch(cfg, acc, session, s, reason, overrideCode) {
   s.lastRelaunchAt = Date.now();
   const nm = disp(acc);
   const running = await isRunning(acc.package);
-  const url = buildDeeplink(acc, session);
-  const dest = acc.joinMode === "share" ? "private server" : "market";
+  // overrideCode = join sekali-pakai ke PS akun lain (buat trade)
+  const url = overrideCode
+    ? `roblox://navigation/share_links?code=${overrideCode}&type=Server`
+    : buildDeeplink(acc, session);
+  const dest = overrideCode ? "server trade (join)" : acc.joinMode === "share" ? "private server" : "market";
   log(`🔄 [${nm}] buka ulang → ${dest}${running ? " (nutup Roblox yg nyangkut)" : ""}`);
   await forceStop(acc.package);
   await new Promise((r) => setTimeout(r, 2500));
@@ -333,7 +336,8 @@ async function handleAccount(cfg, acc, sessions) {
   const online = !!(session && session.online);
   const suppressed = acc.suppressUntil && now < acc.suppressUntil; // lagi teleport/relocate
   const sinceLaunch = s.lastRelaunchAt ? now - s.lastRelaunchAt : Infinity;
-  const forced = acc.pendingCommand === "relaunch"; // web Rejoin / signal error
+  const forced = acc.pendingCommand === "relaunch"; // web Rejoin / signal error / join server
+  const joinCode = acc.pendingJoinCode || null; // sekali-pakai: join ke PS akun lain (trade)
   if (forced && acc.id) await apiPost(cfg, `/api/agent/accounts/${acc.id}/ack`);
 
   // NONAKTIF (Stop): tutup Roblox & jgn ngapa-ngapain
@@ -357,6 +361,20 @@ async function handleAccount(cfg, acc, sessions) {
   if (s.pausedUntil && now < s.pausedUntil) return;
   if (sinceLaunch < cfg.launchSettleMs) return; // baru relaunch → kasih waktu Roblox boot
 
+  // PAKSA (web Rejoin / Join server / signal): relaunch walau lagi online.
+  if (forced) {
+    s.retries = (s.retries || 0) + 1;
+    if (s.retries > cfg.maxRetries) {
+      s.pausedUntil = now + cfg.backoffMs;
+      s.retries = 0;
+      log(`[${disp(acc)}] gagal ${cfg.maxRetries}x — istirahat ${Math.round(cfg.backoffMs / 60000)} menit`);
+      return;
+    }
+    s.offlineSince = 0;
+    await doRelaunch(cfg, acc, session, s, joinCode ? "join server trade" : "perintah relog", joinCode);
+    return;
+  }
+
   const alive = await isRunning(acc.package || "com.roblox.client");
 
   // sehat: online + proses hidup
@@ -372,8 +390,6 @@ async function handleAccount(cfg, acc, sessions) {
   let reason;
   if (!alive) {
     reason = "Roblox mati (ketutup/crash)"; // proses mati → langsung
-  } else if (forced) {
-    reason = "perintah relog"; // dipaksa web/signal, proses hidup
   } else {
     // proses hidup tapi offline = lagi loading/join → sabar
     if (!s.offlineSince) {
