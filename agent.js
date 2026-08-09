@@ -40,7 +40,7 @@ function loadConfig() {
   const cfg = JSON.parse(fs.readFileSync(CFG_PATH, "utf8"));
   cfg.pollMs = cfg.pollMs ?? 5000;
   cfg.launchSettleMs = cfg.launchSettleMs ?? 15000; // jeda boot habis relaunch (jgn dobel)
-  cfg.loadingPatienceMs = cfg.loadingPatienceMs ?? 90000; // proses hidup tp offline = loading, sabar segini
+  cfg.loadingPatienceMs = cfg.loadingPatienceMs ?? 60000; // proses hidup tp offline = loading, sabar segini
   cfg.deadConfirmMs = cfg.deadConfirmMs ?? 45000; // pas hop, proses "mati" sesaat itu wajar — konfirmasi dulu segini (device lemot hop bisa lama)
   cfg.maxRetries = cfg.maxRetries ?? 5;
   cfg.backoffMs = cfg.backoffMs ?? 600000;
