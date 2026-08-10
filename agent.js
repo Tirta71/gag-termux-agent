@@ -399,10 +399,10 @@ async function handleAccount(cfg, acc, sessions) {
   if (suppressed) {
     s.offlineSince = 0;
     if (online) { s.retries = 0; s.pausedUntil = 0; }
-    if (!s.hopLogged) { s.hopLogged = true; log(`[${disp(acc)}] lagi hop server (buy cepat) — agent standby`); }
+    if (!s.hopLogged) { s.hopLogged = true; log(`[${disp(acc)}] lagi pindah server — agent standby`); }
     return;
   }
-  if (s.hopLogged) { s.hopLogged = false; log(`[${disp(acc)}] selesai hop`); }
+  if (s.hopLogged) { s.hopLogged = false; log(`[${disp(acc)}] selesai pindah server`); }
 
   // sehat: online + proses hidup
   if (online) {
